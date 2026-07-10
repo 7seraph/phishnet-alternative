@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "PhishNet Alternative",
+  "version": "0.1.0",
+  "description": "Scans the currently open Gmail message and scores it for phishing risk in real time.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "PhishNet"
+  },
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": [
+    "https://mail.google.com/*",
+    "http://127.0.0.1:5000/*",
+    "http://localhost:5000/*"
+  ]
+}
