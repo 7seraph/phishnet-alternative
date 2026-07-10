@@ -1,0 +1,45 @@
+{
+  "dataset_size": 17537,
+  "phishing_ratio": 0.374,
+  "classification_report": {
+    "legit": {
+      "precision": 0.9922196796338673,
+      "recall": 0.9872495446265938,
+      "f1-score": 0.98972837251769,
+      "support": 2196.0
+    },
+    "phishing": {
+      "precision": 0.9788359788359788,
+      "recall": 0.9870426829268293,
+      "f1-score": 0.9829222011385199,
+      "support": 1312.0
+    },
+    "accuracy": 0.9871721778791334,
+    "macro avg": {
+      "precision": 0.985527829234923,
+      "recall": 0.9871461137767115,
+      "f1-score": 0.9863252868281049,
+      "support": 3508.0
+    },
+    "weighted avg": {
+      "precision": 0.9872141450139044,
+      "recall": 0.9871721778791334,
+      "f1-score": 0.9871828489003949,
+      "support": 3508.0
+    }
+  },
+  "difficulty_buckets": {
+    "easy (multiple obvious red flags)": {
+      "accuracy": 1.0,
+      "n": 49
+    },
+    "hard (no obvious lexical red flags)": {
+      "accuracy": 0.9876,
+      "n": 2973
+    },
+    "medium": {
+      "accuracy": 0.9835,
+      "n": 486
+    }
+  }
+}

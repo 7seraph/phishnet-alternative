@@ -1,132 +1,57 @@
 """PhishNet Alternative - local backend for the browser extension.
 
-Serves the same TF-IDF + Naive Bayes phishing classifier as the original
-PhishNet, plus a rule-based "real-time feedback" layer that doesn't depend
-on any external LLM. If a Letta token/agent are configured via environment
-variables, an additional AI-generated insight is appended - otherwise that
-step is skipped silently.
+Serves two locally-trained models (see train/) plus a rule-based "real-time
+feedback" layer that doesn't depend on any external LLM:
+
+  - phishing_detector.pkl: TF-IDF + Logistic Regression, trained on a
+    combined six-source email corpus (Enron, Ling-Spam, CEAS_08, Nazario,
+    Nigerian Fraud, SpamAssassin) spanning obvious mass-market scams to real
+    targeted phishing.
+  - url_detector.pkl: a structural/lexical URL risk model (url_features.py)
+    used to score every link pulled out of the message, so brand
+    impersonation like "wellsfargo--com--verify.wsipv6.com" gets flagged
+    even when it doesn't hit a static suspicious-TLD list.
+
+Both predictions feed into a plain-English explanation (explain.py) and a
+list of tailored phishing-avoidance tips (tips.py). If a Letta token/agent
+are configured via environment variables, an additional AI-generated insight
+is appended - otherwise that step is skipped silently.
 """
 import os
-from html.parser import HTMLParser
-from urllib.parse import urlparse
 
 import joblib
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+from explain import build_explanation, top_contributing_terms
+from heuristics import analyze_heuristics, domain_of, extract_links
+from tips import build_tips
+from url_features import feature_vector
+
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "phishing_detector.pkl")
-model = joblib.load(MODEL_PATH)
+MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
+email_model = joblib.load(os.path.join(MODEL_DIR, "phishing_detector.pkl"))
 
-URGENCY_WORDS = [
-    "urgent", "immediately", "act now", "verify your account", "account suspended",
-    "suspend your account", "confirm your identity", "unusual activity",
-    "limited time", "act within", "your account will be closed", "final notice",
-    "password will expire", "click here",
-]
-
-GENERIC_GREETINGS = [
-    "dear customer", "dear user", "dear valued customer", "dear account holder",
-    "dear member", "dear sir/madam",
-]
-
-SENSITIVE_WORDS = [
-    "password", "social security", "ssn", "credit card", "bank account",
-    "routing number", "one-time code", "otp", "verify your account",
-    "pin number",
-]
-
-SUSPICIOUS_TLDS = [".ru", ".tk", ".top", ".xyz", ".click", ".gq", ".cf", ".zip", ".rest"]
+URL_MODEL_PATH = os.path.join(MODEL_DIR, "url_detector.pkl")
+url_model = joblib.load(URL_MODEL_PATH) if os.path.exists(URL_MODEL_PATH) else None
 
 
-class _LinkExtractor(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.links = []
-        self._href = None
-        self._text = ""
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "a":
-            self._href = dict(attrs).get("href")
-            self._text = ""
-
-    def handle_data(self, data):
-        if self._href is not None:
-            self._text += data
-
-    def handle_endtag(self, tag):
-        if tag == "a" and self._href is not None:
-            self.links.append({"href": self._href, "text": self._text.strip()})
-            self._href = None
-            self._text = ""
-
-
-def extract_links(html):
-    if not html:
-        return []
-    parser = _LinkExtractor()
-    try:
-        parser.feed(html)
-    except Exception:
-        pass
-    return [l for l in parser.links if l["href"]]
-
-
-def domain_of(value):
-    if not value:
-        return ""
-    if "://" not in value:
-        value = f"//{value}"
-    try:
-        return urlparse(value).netloc.lower().split("@")[-1]
-    except Exception:
-        return ""
-
-
-def analyze_heuristics(sender, subject, body_text, body_html):
-    reasons = []
-    text = f"{subject} {body_text}".lower()
-
-    urgency_hits = sorted({w for w in URGENCY_WORDS if w in text})
-    if urgency_hits:
-        reasons.append("Urgent/pressure language detected: " + ", ".join(urgency_hits[:3]))
-
-    if any(g in text for g in GENERIC_GREETINGS):
-        reasons.append("Generic greeting instead of your name - common in mass phishing emails.")
-
-    sensitive_hits = sorted({w for w in SENSITIVE_WORDS if w in text})
-    if sensitive_hits:
-        reasons.append("Requests sensitive info: " + ", ".join(sensitive_hits[:3]))
-
+def score_links(body_html):
     links = extract_links(body_html)
+    if not links or url_model is None:
+        return links, []
 
-    mismatched = []
-    for link in links:
-        href_domain = domain_of(link["href"])
-        text_domain = domain_of(link["text"]) if "." in link["text"] else ""
-        if text_domain and href_domain and text_domain != href_domain:
-            mismatched.append(link)
-    if mismatched:
-        reasons.append(f"{len(mismatched)} link(s) display one destination but point somewhere else.")
-
-    suspicious_links = [l for l in links if domain_of(l["href"]).endswith(tuple(SUSPICIOUS_TLDS))]
-    if suspicious_links:
-        domains = sorted({domain_of(l["href"]) for l in suspicious_links})
-        reasons.append("Link(s) point to uncommon/high-risk domains: " + ", ".join(domains[:3]))
-
-    sender_domain = domain_of(sender.split("@")[-1]) if "@" in sender else ""
-    link_domains = {domain_of(l["href"]) for l in links}
-    link_domains.discard("")
-    if sender_domain and link_domains and sender_domain not in link_domains:
-        reasons.append("Sender's domain doesn't match any linked domains in the message.")
-
-    return reasons
+    vectors = [feature_vector(link["href"]) for link in links]
+    scores = url_model.predict_proba(vectors)[:, 1]
+    return links, [
+        {"href": link["href"], "text": link["text"], "score": round(float(score), 3)}
+        for link, score in zip(links, scores)
+    ]
 
 
 def get_llm_insight(subject, body_text, prediction):
@@ -168,27 +93,38 @@ def analyze():
         return jsonify({"error": "No email body provided"}), 400
 
     combined_text = f"{subject} {body_text}"
-    prediction_idx = model.predict([combined_text])[0]
-    prob = model.predict_proba([combined_text])[0][prediction_idx]
+    prediction_idx = int(email_model.predict([combined_text])[0])
+    prob = email_model.predict_proba([combined_text])[0][prediction_idx]
     prediction = "fake" if prediction_idx == 1 else "real"
 
-    reasons = analyze_heuristics(sender, subject, body_text, body_html)
+    terms = top_contributing_terms(email_model, combined_text, prediction_idx)
+    explanation = build_explanation(prediction, float(prob), terms)
+
+    links, link_risks = score_links(body_html)
+    reasons = analyze_heuristics(sender, subject, body_text, body_html, link_risks)
+
     insight = get_llm_insight(subject, body_text, prediction)
     if insight:
-        reasons.append(f"AI insight: {insight}")
+        reasons.append({"id": "ai_insight", "message": f"AI insight: {insight}"})
+
+    tips = build_tips([r["id"] for r in reasons], prediction)
 
     return jsonify(
         {
             "prediction": prediction,
             "confidence": round(float(prob), 3),
-            "reasons": reasons,
+            "explanation": explanation,
+            "topTerms": terms,
+            "reasons": [r["message"] for r in reasons],
+            "tips": tips,
+            "links": link_risks,
         }
     )
 
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "urlModel": url_model is not None})
 
 
 if __name__ == "__main__":

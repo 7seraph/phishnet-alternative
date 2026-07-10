@@ -3,7 +3,6 @@ flask-cors
 scikit-learn
 joblib
 python-dotenv
-pandas
 
 # Optional: only needed if you want the LLM "AI insight" feature back.
 # Requires LETTA_TOKEN and LETTA_AGENT_ID in backend/.env

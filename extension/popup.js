@@ -87,16 +87,29 @@ function renderResult(data) {
   const verdictLabel = data.prediction === "fake" ? "Likely Phishing" : "Likely Legitimate";
   const pct = Math.round(data.confidence * 100);
 
+  const explanationHtml = data.explanation
+    ? `<p class="explanation">${escapeHtml(data.explanation)}</p>`
+    : "";
+
   const reasonsHtml =
     data.reasons && data.reasons.length
       ? `<ul>${data.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>`
       : "<p class='muted'>No specific red flags detected by the heuristics.</p>";
 
+  const tipsHtml =
+    data.tips && data.tips.length
+      ? `<h3>Tips to protect yourself</h3><ul class="tips">${data.tips
+          .map((t) => `<li>${escapeHtml(t)}</li>`)
+          .join("")}</ul>`
+      : "";
+
   resultsEl.innerHTML = `
     <div class="verdict ${escapeHtml(data.prediction)}">${escapeHtml(verdictLabel)}</div>
     <div class="score">Confidence: ${pct}%</div>
+    ${explanationHtml}
     <h3>Real-time feedback</h3>
     ${reasonsHtml}
+    ${tipsHtml}
   `;
 }
 

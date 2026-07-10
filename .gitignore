@@ -5,3 +5,7 @@ venv/
 .env
 node_modules/
 *.log
+
+# Raw training data is downloaded on demand by backend/train/datasets.py -
+# no need to version tens of MB of CSV/parquet.
+backend/train/data/
