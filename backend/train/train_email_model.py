@@ -5,10 +5,17 @@ Upgrades over the original PhishNet model:
     Nazario, Nigerian Fraud, SpamAssassin) instead of Enron alone, so it sees
     everything from obvious mass-market scams to real spear-phishing that
     closely imitates legitimate email.
-  - TF-IDF now includes bigrams and is followed by class-balanced Logistic
-    Regression instead of Multinomial Naive Bayes: better probability
-    calibration, and linear coefficients we can use to explain *why* a given
-    email was flagged (see explain.py).
+  - Plus any user corrections collected in-app via the "Correct the model"
+    button (see datasets.load_corrections / app.py /api/feedback) - those
+    get folded back in here so a full retrain also learns from them, not
+    just the single live gradient step applied at correction time.
+  - TF-IDF now includes bigrams and is followed by class-balanced
+    SGDClassifier(loss="log_loss") - mathematically equivalent to Logistic
+    Regression trained via gradient descent, but (unlike sklearn's
+    LogisticRegression) it supports partial_fit, so /api/feedback can
+    "backpropagate" a single corrected example into the live model without
+    a full offline retrain. We still get linear coefficients to explain
+    *why* a given email was flagged (see explain.py).
 
 Usage:
     python train_email_model.py
@@ -20,15 +27,16 @@ import sys
 import joblib
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
+from sklearn.utils.class_weight import compute_class_weight
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from datasets import load_email_dataset  # noqa: E402
+from datasets import load_corrections, load_email_dataset  # noqa: E402
 from heuristics import keyword_hits  # noqa: E402
 
 MODEL_PATH = os.path.join(
@@ -36,6 +44,15 @@ MODEL_PATH = os.path.join(
 )
 METRICS_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "model", "phishing_detector.metrics.json"
+)
+# Tracks how many rows of corrections.csv the backend's live-learning loop
+# (see app.py apply_pending_corrections) has already folded into the model
+# via partial_fit. A full retrain here already includes every current
+# correction (load_corrections() reads the same file), so we mark them all
+# as processed - otherwise the loop would immediately partial_fit them
+# again onto a model that was just freshly fit on them.
+CORRECTIONS_STATE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "model", "corrections_state.json"
 )
 
 
@@ -52,9 +69,26 @@ def main():
     df = load_email_dataset()
     print(f"Loaded {len(df)} unique emails ({df['label'].mean():.1%} phishing)")
 
+    corrections = load_corrections()
+    if not corrections.empty:
+        print(f"Folding in {len(corrections)} user correction(s) from the extension")
+        df = pd.concat([df, corrections], ignore_index=True)
+        df = df.drop_duplicates(subset=["text"], keep="last")
+
     X_train, X_test, y_train, y_test = train_test_split(
         df["text"], df["label"], test_size=0.2, random_state=42, stratify=df["label"]
     )
+
+    # A fixed {label: weight} dict instead of the "balanced" string: SGDClassifier
+    # recomputes "balanced" weights from whatever's in the current partial_fit
+    # batch, which blows up (ValueError: classes should have valid labels that
+    # are in y) on the single-example batches /api/feedback sends for a live
+    # correction. A precomputed dict sidesteps that while still balancing the
+    # class skew at initial training time.
+    class_weight_values = compute_class_weight(
+        "balanced", classes=sorted(df["label"].unique()), y=y_train
+    )
+    class_weight = dict(zip(sorted(df["label"].unique()), class_weight_values))
 
     pipeline = Pipeline([
         (
@@ -70,10 +104,11 @@ def main():
         ),
         (
             "clf",
-            LogisticRegression(
+            SGDClassifier(
+                loss="log_loss",
+                class_weight=class_weight,
+                alpha=1e-5,
                 max_iter=2000,
-                class_weight="balanced",
-                C=10,
                 random_state=42,
             ),
         ),
@@ -114,6 +149,8 @@ def main():
             f,
             indent=2,
         )
+    with open(CORRECTIONS_STATE_PATH, "w") as f:
+        json.dump({"processed_rows": len(corrections)}, f)
     print(f"\nSaved model to {MODEL_PATH}")
     print(f"Saved metrics to {METRICS_PATH}")
 

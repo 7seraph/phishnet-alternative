@@ -61,6 +61,26 @@ def load_email_dataset():
     return df[["text", "label"]].reset_index(drop=True)
 
 
+CORRECTIONS_PATH = os.path.join(DATA_DIR, "corrections.csv")
+
+
+def load_corrections():
+    """Returns a DataFrame (text, label) of user corrections submitted via the
+    extension's "Correct the model" button (see app.py /api/feedback).
+
+    Each correction is already applied to the live model with a single
+    partial_fit step when it's submitted; this lets a full offline retrain
+    (this script) fold the same examples back into the base dataset too.
+    Returns an empty DataFrame if no corrections have been collected yet.
+    """
+    if not os.path.exists(CORRECTIONS_PATH):
+        return pd.DataFrame(columns=["text", "label"])
+    df = pd.read_csv(CORRECTIONS_PATH)
+    df["label"] = df["label"].astype(int)
+    df["text"] = df["text"].astype(str)
+    return df[["text", "label"]]
+
+
 def load_url_dataset():
     """Returns a DataFrame with columns: url, label (1=phishing, 0=legit)."""
     frames = []
